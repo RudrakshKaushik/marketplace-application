@@ -3,7 +3,12 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, TypeVar
 
-from django.core.cache import cache
+from backend.cache_utils import (
+    cache_delete_many,
+    cache_get,
+    cache_get_or_set,
+    cache_set,
+)
 from django.db import connection
 from django.db.models import Avg, Count, Q
 
@@ -33,7 +38,7 @@ def run_parallel(*tasks: Callable[[], T]) -> list[T]:
 
 
 def invalidate_admin_cache() -> None:
-    cache.delete_many(
+    cache_delete_many(
         [
             ADMIN_STATS_CACHE_KEY,
             ADMIN_PENDING_CACHE_KEY,
@@ -87,7 +92,7 @@ def _fetch_marketplace_totals() -> dict[str, int]:
 
 
 def get_dashboard_stats() -> dict[str, Any]:
-    cached = cache.get(ADMIN_STATS_CACHE_KEY)
+    cached = cache_get(ADMIN_STATS_CACHE_KEY)
     if cached is not None:
         return cached
 
@@ -103,7 +108,7 @@ def get_dashboard_stats() -> dict[str, Any]:
         "services": service_stats,
         "marketplace": marketplace_totals,
     }
-    cache.set(ADMIN_STATS_CACHE_KEY, payload, ADMIN_CACHE_TTL)
+    cache_set(ADMIN_STATS_CACHE_KEY, payload, ADMIN_CACHE_TTL)
     return payload
 
 
@@ -129,7 +134,7 @@ def _serialize_pending_provider(provider: User, request) -> dict[str, Any]:
 
 
 def get_pending_providers_payload(request) -> dict[str, Any]:
-    cached = cache.get(ADMIN_PENDING_CACHE_KEY)
+    cached = cache_get(ADMIN_PENDING_CACHE_KEY)
     if cached is not None:
         return cached
 
@@ -159,7 +164,7 @@ def get_pending_providers_payload(request) -> dict[str, Any]:
         "success": True,
         "providers": [_serialize_pending_provider(provider, request) for provider in providers],
     }
-    cache.set(ADMIN_PENDING_CACHE_KEY, payload, ADMIN_CACHE_TTL)
+    cache_set(ADMIN_PENDING_CACHE_KEY, payload, ADMIN_CACHE_TTL)
     return payload
 
 
@@ -341,7 +346,7 @@ def _normalize_quote_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def get_marketplace_monitor_payload(request, sections: set[str] | None = None) -> dict[str, Any]:
     include = sections or {"bookings", "quotes", "providers"}
     if include == {"bookings", "quotes", "providers"}:
-        cached = cache.get(ADMIN_MONITOR_CACHE_KEY)
+        cached = cache_get(ADMIN_MONITOR_CACHE_KEY)
         if cached is not None:
             return cached
 
@@ -352,7 +357,7 @@ def get_marketplace_monitor_payload(request, sections: set[str] | None = None) -
         tasks.append(
             (
                 "bookings",
-                lambda: cache.get_or_set(
+                lambda: cache_get_or_set(
                     ADMIN_MONITOR_BOOKINGS_KEY,
                     lambda: _normalize_booking_rows(_fetch_booking_rows()),
                     ADMIN_CACHE_TTL,
@@ -363,7 +368,7 @@ def get_marketplace_monitor_payload(request, sections: set[str] | None = None) -
         tasks.append(
             (
                 "quotes",
-                lambda: cache.get_or_set(
+                lambda: cache_get_or_set(
                     ADMIN_MONITOR_QUOTES_KEY,
                     lambda: _normalize_quote_rows(_fetch_quote_rows()),
                     ADMIN_CACHE_TTL,
@@ -374,7 +379,7 @@ def get_marketplace_monitor_payload(request, sections: set[str] | None = None) -
         tasks.append(
             (
                 "providers",
-                lambda: cache.get_or_set(
+                lambda: cache_get_or_set(
                     ADMIN_MONITOR_PROVIDERS_KEY,
                     lambda: _fetch_provider_performance_rows(request),
                     ADMIN_CACHE_TTL,
@@ -391,6 +396,6 @@ def get_marketplace_monitor_payload(request, sections: set[str] | None = None) -
             payload[key] = value
 
     if include == {"bookings", "quotes", "providers"}:
-        cache.set(ADMIN_MONITOR_CACHE_KEY, payload, ADMIN_CACHE_TTL)
+        cache_set(ADMIN_MONITOR_CACHE_KEY, payload, ADMIN_CACHE_TTL)
 
     return payload

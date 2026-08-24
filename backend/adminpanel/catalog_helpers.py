@@ -1,4 +1,4 @@
-from django.core.cache import cache
+from backend.cache_utils import cache_delete, cache_get, cache_set
 
 from .models import ServiceCategory, SpotlightImage
 
@@ -41,7 +41,7 @@ def _serialize_spotlight(spotlight, request):
 
 
 def build_home_catalog_payload(request):
-    cached = cache.get(HOME_CATALOG_CACHE_KEY)
+    cached = cache_get(HOME_CATALOG_CACHE_KEY)
     if cached is not None:
         return cached
 
@@ -78,9 +78,9 @@ def build_home_catalog_payload(request):
         "coming_soon_services": coming_soon_services,
         "spotlights": spotlights,
     }
-    cache.set(HOME_CATALOG_CACHE_KEY, payload, HOME_CATALOG_TTL)
+    cache_set(HOME_CATALOG_CACHE_KEY, payload, HOME_CATALOG_TTL)
     return payload
 
 
 def invalidate_home_catalog_cache():
-    cache.delete(HOME_CATALOG_CACHE_KEY)
+    cache_delete(HOME_CATALOG_CACHE_KEY)

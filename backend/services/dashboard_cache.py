@@ -1,5 +1,6 @@
-from django.core.cache import cache
 from django.db.models import Count, Q
+
+from backend.cache_utils import cache_delete, cache_delete_many, cache_get, cache_set
 
 from services.models import Booking, Quote, ServiceRequest
 
@@ -24,7 +25,7 @@ def _customer_home_key(user_id: int) -> str:
 
 
 def invalidate_customer_dashboard_cache(user_id: int) -> None:
-    cache.delete_many(
+    cache_delete_many(
         [
             _customer_stats_key(user_id),
             _customer_home_key(user_id),
@@ -33,12 +34,12 @@ def invalidate_customer_dashboard_cache(user_id: int) -> None:
 
 
 def invalidate_provider_dashboard_cache(user_id: int) -> None:
-    cache.delete(_provider_stats_key(user_id))
+    cache_delete(_provider_stats_key(user_id))
 
 
 def get_customer_stats(user_id: int) -> dict[str, int]:
     cache_key = _customer_stats_key(user_id)
-    cached = cache.get(cache_key)
+    cached = cache_get(cache_key)
     if cached is not None:
         return cached
 
@@ -52,13 +53,13 @@ def get_customer_stats(user_id: int) -> dict[str, int]:
         "booked_count": booked_count,
         "open_requests": total - booked_count,
     }
-    cache.set(cache_key, payload, DASHBOARD_CACHE_TTL)
+    cache_set(cache_key, payload, DASHBOARD_CACHE_TTL)
     return payload
 
 
 def get_provider_stats(user) -> dict:
     cache_key = _provider_stats_key(user.id)
-    cached = cache.get(cache_key)
+    cached = cache_get(cache_key)
     if cached is not None:
         return cached
 
@@ -104,13 +105,13 @@ def get_provider_stats(user) -> dict:
         "average_rating": average_rating,
         "total_reviews": total_reviews,
     }
-    cache.set(cache_key, payload, DASHBOARD_CACHE_TTL)
+    cache_set(cache_key, payload, DASHBOARD_CACHE_TTL)
     return payload
 
 
 def get_customer_home_payload(request, user_id: int, catalog_payload: dict) -> dict:
     cache_key = _customer_home_key(user_id)
-    cached = cache.get(cache_key)
+    cached = cache_get(cache_key)
     if cached is not None:
         return cached
 
@@ -120,5 +121,5 @@ def get_customer_home_payload(request, user_id: int, catalog_payload: dict) -> d
         "open_requests": stats["open_requests"],
         "catalog": catalog_payload,
     }
-    cache.set(cache_key, payload, DASHBOARD_CACHE_TTL)
+    cache_set(cache_key, payload, DASHBOARD_CACHE_TTL)
     return payload

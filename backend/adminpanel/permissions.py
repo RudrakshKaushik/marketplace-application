@@ -1,4 +1,4 @@
-from django.core.cache import cache
+from backend.cache_utils import cache_get, cache_set
 from rest_framework.permissions import BasePermission
 
 
@@ -145,7 +145,7 @@ def get_admin_permissions(user):
     # --------------------------------------------------------
 
     cache_key = f"admin:permissions:{user.id}"
-    cached = cache.get(cache_key)
+    cached = cache_get(cache_key)
     if cached is not None:
         return cached
 
@@ -160,7 +160,7 @@ def get_admin_permissions(user):
             for permission
             in ADMIN_PERMISSION_NAMES
         }
-        cache.set(cache_key, permissions, ADMIN_PERMISSIONS_CACHE_TTL)
+        cache_set(cache_key, permissions, ADMIN_PERMISSIONS_CACHE_TTL)
         return permissions
 
     # --------------------------------------------------------
@@ -178,7 +178,7 @@ def get_admin_permissions(user):
         for permission
         in ADMIN_PERMISSION_NAMES
     }
-    cache.set(cache_key, permissions, ADMIN_PERMISSIONS_CACHE_TTL)
+    cache_set(cache_key, permissions, ADMIN_PERMISSIONS_CACHE_TTL)
     return permissions
 
 

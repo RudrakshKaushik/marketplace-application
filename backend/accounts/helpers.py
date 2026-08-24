@@ -1,8 +1,9 @@
 from django.conf import settings
-from django.core.cache import cache
 from django.db import ProgrammingError
 from django.db.models import Avg, Count
 from django.db.utils import OperationalError
+
+from backend.cache_utils import cache_delete, cache_get, cache_set
 
 from adminpanel.models import ServiceCategory
 from services.models import Review
@@ -13,12 +14,12 @@ CATALOG_CACHE_TIMEOUT = 300  # 5 minutes
 
 
 def invalidate_service_category_cache():
-    cache.delete(CACHE_PROVIDER_ROLE_KEYS)
-    cache.delete(CACHE_ACTIVE_SERVICE_KEYS)
+    cache_delete(CACHE_PROVIDER_ROLE_KEYS)
+    cache_delete(CACHE_ACTIVE_SERVICE_KEYS)
 
 
 def provider_role_keys():
-    cached = cache.get(CACHE_PROVIDER_ROLE_KEYS)
+    cached = cache_get(CACHE_PROVIDER_ROLE_KEYS)
     if cached is not None:
         return cached
 
@@ -28,12 +29,12 @@ def provider_role_keys():
     except (ProgrammingError, OperationalError):
         keys = ["gardener", "electrician", "plumber"]
 
-    cache.set(CACHE_PROVIDER_ROLE_KEYS, keys, CATALOG_CACHE_TIMEOUT)
+    cache_set(CACHE_PROVIDER_ROLE_KEYS, keys, CATALOG_CACHE_TIMEOUT)
     return keys
 
 
 def active_service_keys():
-    cached = cache.get(CACHE_ACTIVE_SERVICE_KEYS)
+    cached = cache_get(CACHE_ACTIVE_SERVICE_KEYS)
     if cached is not None:
         return cached
 
@@ -44,7 +45,7 @@ def active_service_keys():
     except (ProgrammingError, OperationalError):
         keys = []
 
-    cache.set(CACHE_ACTIVE_SERVICE_KEYS, keys, CATALOG_CACHE_TIMEOUT)
+    cache_set(CACHE_ACTIVE_SERVICE_KEYS, keys, CATALOG_CACHE_TIMEOUT)
     return keys
 
 
