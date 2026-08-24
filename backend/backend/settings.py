@@ -166,6 +166,7 @@ else:
 REDIS_HOST = os.environ["REDIS_HOST"]
 REDIS_PORT = int(os.environ["REDIS_PORT"])
 REDIS_MAX_CONNECTIONS = int(os.environ.get("REDIS_MAX_CONNECTIONS", "4"))
+REDIS_URL = os.environ.get("REDIS_URL") or f"redis://{REDIS_HOST}:{REDIS_PORT}"
 # Use locmem by default — Render free Redis has very low client limits.
 # Set CACHE_BACKEND=redis only if your Redis plan supports more connections.
 CACHE_BACKEND = os.environ.get("CACHE_BACKEND", "locmem").strip().lower()
@@ -174,7 +175,7 @@ if CACHE_BACKEND == "redis":
     CACHES = {
         "default": {
             "BACKEND": "django.core.cache.backends.redis.RedisCache",
-            "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/1",
+            "LOCATION": REDIS_URL if REDIS_URL.endswith("/1") else f"{REDIS_URL.rstrip('/')}/1",
             "OPTIONS": {
                 "max_connections": REDIS_MAX_CONNECTIONS,
                 "socket_connect_timeout": 2,
@@ -191,13 +192,14 @@ else:
         }
     }
 
+# channels_redis dict hosts require "address" as a URL string (not a host/port tuple).
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
             "hosts": [
                 {
-                    "address": (REDIS_HOST, REDIS_PORT),
+                    "address": REDIS_URL,
                     "max_connections": REDIS_MAX_CONNECTIONS,
                 }
             ],
