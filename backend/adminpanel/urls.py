@@ -3,11 +3,16 @@ from django.urls import path
 from .views import (
     # Dashboard
     admin_dashboard,
+    customer_analytics_api,
+    dashboard_trends_api,
+    geographic_analytics_api,
 
     # Provider management
     pending_providers,
     all_providers,
     provider_detail_api,
+    service_performance_api,
+    service_request_funnel_api,
     update_provider_api,
     approve_provider,
     reject_provider,
@@ -334,4 +339,29 @@ urlpatterns = [
         delete_admin_user_api,
         name="delete-admin-user",
     ),
+    path(
+    "dashboard/trends/",
+    dashboard_trends_api,
+    name="dashboard-trends",
+),
+path(
+    "dashboard/service-performance/",
+    service_performance_api,
+    name="dashboard-service-performance",
+),
+path(
+    "dashboard/funnel/",
+    service_request_funnel_api,
+    name="dashboard-funnel",
+),
+path(
+    "dashboard/customer-analytics/",
+    customer_analytics_api,
+    name="dashboard-customer-analytics",
+),
+path(
+    "dashboard/geographic-analytics/",
+    geographic_analytics_api,
+    name="dashboard-geographic-analytics",
+),
 ]

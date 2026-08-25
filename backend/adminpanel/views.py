@@ -1,6 +1,3 @@
-from django.db.models import Avg, Count, Max, Q
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -9,16 +6,25 @@ from rest_framework.response import Response
 
 from accounts.models import User
 from accounts.helpers import is_provider_role, media_url, provider_role_keys
-from services.models import ServiceRequest, Quote, Booking, Review
-from adminpanel.catalog_helpers import build_home_catalog_payload
-from adminpanel.admin_perf import (
-    get_dashboard_stats,
-    get_marketplace_monitor_payload,
-    get_pending_providers_payload,
-    invalidate_admin_cache,
+from service_requests.models import (
+    CustomerServiceRequest,
+    ProviderQuotation,
+    ServiceBooking,
+    ServiceReview,
 )
+from datetime import timedelta
+from django.db.models.functions import TruncDate, TruncMonth
+from django.db.models import Avg, Count, Max, Q, Sum
+from django.utils import timezone
 
-from .models import ServiceCategory
+from .services.dashboard_filters import (
+    get_dashboard_filters,
+    filter_service_requests,
+    filter_provider_quotations,
+    filter_service_bookings,
+    filter_service_reviews,
+)
+from .models import ServiceCategory, SpotlightImage
 
 from .permissions import (
     IsAdminUser,
@@ -37,6 +43,7 @@ from .serializers import (
     AdminUserSerializer,
     CreateAdminUserSerializer,
     UpdateAdminUserSerializer,
+    SpotlightImageSerializer,
 )
 
 def parse_boolean(value, default=False):
@@ -65,8 +72,20 @@ def parse_boolean(value, default=False):
 ])
 def admin_dashboard(request):
     """
-    Return admin profile, permissions,
-    and marketplace dashboard statistics.
+    Production admin dashboard summary.
+
+    Supports:
+        ?period=7d
+        ?period=30d
+        ?period=6m
+        ?period=1y
+
+        ?from=2026-08-01
+        ?to=2026-08-25
+
+        ?service=plumber
+        ?provider_id=25
+        ?status=completed
     """
 
     user = request.user
@@ -75,32 +94,497 @@ def admin_dashboard(request):
     # ADMIN PERMISSIONS
     # =========================================================
 
-    permissions = get_admin_permissions(user)
-    dashboard_data = get_dashboard_stats()
+    permissions = get_admin_permissions(
+        user
+    )
+
+    # =========================================================
+    # DASHBOARD FILTERS
+    # =========================================================
+
+    dashboard_filters = (
+        get_dashboard_filters(request)
+    )
+
+    # =========================================================
+    # CUSTOMER STATISTICS
+    # =========================================================
+
+    customer_queryset = (
+        User.objects
+        .filter(
+            role="customer"
+        )
+    )
+
+    total_customers = (
+        customer_queryset.count()
+    )
+
+    active_customers = (
+        customer_queryset
+        .filter(
+            is_active=True
+        )
+        .count()
+    )
+
+    inactive_customers = (
+        customer_queryset
+        .filter(
+            is_active=False
+        )
+        .count()
+    )
+
+    # =========================================================
+    # PROVIDER STATISTICS
+    # =========================================================
+
+    provider_roles = (
+        provider_role_keys()
+    )
+
+    provider_queryset = (
+        User.objects
+        .filter(
+            role__in=provider_roles
+        )
+    )
+
+    total_providers = (
+        provider_queryset.count()
+    )
+
+    active_providers = (
+        provider_queryset
+        .filter(
+            is_active=True
+        )
+        .count()
+    )
+
+    inactive_providers = (
+        provider_queryset
+        .filter(
+            is_active=False
+        )
+        .count()
+    )
+
+    pending_providers = (
+        provider_queryset
+        .filter(
+            is_approved=False
+        )
+        .count()
+    )
+
+    approved_providers = (
+        provider_queryset
+        .filter(
+            is_approved=True
+        )
+        .count()
+    )
+
+    verified_providers = (
+        provider_queryset
+        .filter(
+            is_verified=True
+        )
+        .count()
+    )
+
+    unverified_providers = (
+        provider_queryset
+        .filter(
+            is_verified=False
+        )
+        .count()
+    )
+
+    # =========================================================
+    # SERVICE STATISTICS
+    # =========================================================
+
+    total_services = (
+        ServiceCategory.objects.count()
+    )
+
+    active_services = (
+        ServiceCategory.objects
+        .filter(
+            status="active"
+        )
+        .count()
+    )
+
+    coming_soon_services = (
+        ServiceCategory.objects
+        .filter(
+            status="coming_soon"
+        )
+        .count()
+    )
+
+    inactive_services = (
+        ServiceCategory.objects
+        .filter(
+            status="inactive"
+        )
+        .count()
+    )
+
+    popular_services = (
+        ServiceCategory.objects
+        .filter(
+            status="active",
+            is_popular=True,
+        )
+        .count()
+    )
+
+    # =========================================================
+    # BASE ANALYTICS QUERYSETS
+    # =========================================================
+
+    service_requests = (
+        filter_service_requests(
+            CustomerServiceRequest.objects.all(),
+            dashboard_filters,
+        )
+    )
+
+    quotations = (
+        filter_provider_quotations(
+            ProviderQuotation.objects.all(),
+            dashboard_filters,
+        )
+    )
+
+    bookings = (
+        filter_service_bookings(
+            ServiceBooking.objects.all(),
+            dashboard_filters,
+        )
+    )
+
+    reviews = (
+        filter_service_reviews(
+            ServiceReview.objects.all(),
+            dashboard_filters,
+        )
+    )
+
+    # =========================================================
+    # MARKETPLACE TOTALS
+    # =========================================================
+
+    total_requests = (
+        service_requests.count()
+    )
+
+    total_quotes = (
+        quotations.count()
+    )
+
+    total_bookings = (
+        bookings.count()
+    )
+
+    completed_bookings = (
+        bookings
+        .filter(
+            status="completed"
+        )
+        .count()
+    )
+
+    cancelled_bookings = (
+        bookings
+        .filter(
+            status="cancelled"
+        )
+        .count()
+    )
+
+    total_reviews = (
+        reviews.count()
+    )
+
+    # =========================================================
+    # REQUEST ACTIVITY
+    # =========================================================
+
+    now = timezone.now()
+
+    today = now.date()
+
+    seven_days_ago = (
+        today - timedelta(days=6)
+    )
+
+    month_start = (
+        today.replace(day=1)
+    )
+
+    requests_today = (
+        CustomerServiceRequest.objects
+        .filter(
+            created_at__date=today
+        )
+    )
+
+    requests_this_week = (
+        CustomerServiceRequest.objects
+        .filter(
+            created_at__date__gte=(
+                seven_days_ago
+            ),
+            created_at__date__lte=today,
+        )
+    )
+
+    requests_this_month = (
+        CustomerServiceRequest.objects
+        .filter(
+            created_at__date__gte=(
+                month_start
+            ),
+            created_at__date__lte=today,
+        )
+    )
+
+    # Apply service filter to these operational counters too.
+    service_filter = (
+        dashboard_filters.get(
+            "service"
+        )
+    )
+
+    if service_filter:
+
+        requests_today = (
+            requests_today.filter(
+                category__key__iexact=(
+                    service_filter
+                )
+            )
+        )
+
+        requests_this_week = (
+            requests_this_week.filter(
+                category__key__iexact=(
+                    service_filter
+                )
+            )
+        )
+
+        requests_this_month = (
+            requests_this_month.filter(
+                category__key__iexact=(
+                    service_filter
+                )
+            )
+        )
+
+    requests_today_count = (
+        requests_today.count()
+    )
+
+    requests_this_week_count = (
+        requests_this_week.count()
+    )
+
+    requests_this_month_count = (
+        requests_this_month.count()
+    )
+
+    # =========================================================
+    # BOOKING VALUE
+    # =========================================================
+    # Cancelled bookings are excluded from booking-value KPIs.
+
+    non_cancelled_bookings = (
+        bookings.exclude(
+            status="cancelled"
+        )
+    )
+
+    booking_value_data = (
+        non_cancelled_bookings.aggregate(
+            total=Sum(
+                "final_price"
+            ),
+            average=Avg(
+                "final_price"
+            ),
+        )
+    )
+
+    total_booking_value = (
+        booking_value_data["total"]
+        or 0
+    )
+
+    average_booking_value = (
+        booking_value_data["average"]
+        or 0
+    )
+
+    # =========================================================
+    # COMPLETION RATE
+    # =========================================================
+
+    completion_rate = 0
+
+    if total_bookings > 0:
+
+        completion_rate = round(
+            (
+                completed_bookings
+                / total_bookings
+            )
+            * 100,
+            2,
+        )
+
+    # =========================================================
+    # CANCELLATION RATE
+    # =========================================================
+
+    cancellation_rate = 0
+
+    if total_bookings > 0:
+
+        cancellation_rate = round(
+            (
+                cancelled_bookings
+                / total_bookings
+            )
+            * 100,
+            2,
+        )
+
+    # =========================================================
+    # AVERAGE PROVIDER RATING
+    # =========================================================
+
+    rating_data = (
+        reviews.aggregate(
+            average=Avg(
+                "rating"
+            )
+        )
+    )
+
+    average_provider_rating = (
+        rating_data["average"]
+        or 0
+    )
+
+    average_provider_rating = round(
+        float(
+            average_provider_rating
+        ),
+        2,
+    )
+
+    # =========================================================
+    # RESPONSE
+    # =========================================================
 
     return Response(
         {
             "success": True,
 
-            # ---------------------------------------------
+            "message": (
+                "Admin dashboard fetched "
+                "successfully."
+            ),
+
+            # =================================================
+            # APPLIED FILTERS
+            # =================================================
+
+            "filters": {
+                "period": (
+                    dashboard_filters[
+                        "period"
+                    ]
+                ),
+
+                "from": (
+                    dashboard_filters[
+                        "start_date"
+                    ]
+                ),
+
+                "to": (
+                    dashboard_filters[
+                        "end_date"
+                    ]
+                ),
+
+                "service": (
+                    dashboard_filters[
+                        "service"
+                    ]
+                ),
+
+                "provider_id": (
+                    dashboard_filters[
+                        "provider_id"
+                    ]
+                ),
+
+                "status": (
+                    dashboard_filters[
+                        "status"
+                    ]
+                ),
+            },
+
+            # =================================================
             # LOGGED-IN ADMIN
-            # ---------------------------------------------
+            # =================================================
 
             "admin": {
                 "id": user.id,
-                "username": user.username,
-                "email": user.email,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
+
+                "username": (
+                    user.username
+                ),
+
+                "email": (
+                    user.email
+                ),
+
+                "first_name": (
+                    user.first_name
+                ),
+
+                "last_name": (
+                    user.last_name
+                ),
 
                 "full_name": (
                     user.get_full_name()
                     or user.username
                 ),
 
-                "is_staff": user.is_staff,
-                "is_superuser": user.is_superuser,
-                "is_active": user.is_active,
+                "is_staff": (
+                    user.is_staff
+                ),
+
+                "is_superuser": (
+                    user.is_superuser
+                ),
+
+                "is_active": (
+                    user.is_active
+                ),
 
                 "admin_type": (
                     "super_admin"
@@ -108,24 +592,517 @@ def admin_dashboard(request):
                     else "admin"
                 ),
 
-                "permissions": permissions,
+                "permissions": (
+                    permissions
+                ),
             },
 
-            # ---------------------------------------------
+            # =================================================
             # DASHBOARD DATA
-            # ---------------------------------------------
+            # =================================================
 
-            "data": dashboard_data,
+            "data": {
+
+                # =============================================
+                # USERS
+                # =============================================
+
+                "users": {
+
+                    "customers": {
+                        "total": (
+                            total_customers
+                        ),
+
+                        "active": (
+                            active_customers
+                        ),
+
+                        "inactive": (
+                            inactive_customers
+                        ),
+                    },
+
+                    "providers": {
+                        "total": (
+                            total_providers
+                        ),
+
+                        "active": (
+                            active_providers
+                        ),
+
+                        "inactive": (
+                            inactive_providers
+                        ),
+
+                        "pending": (
+                            pending_providers
+                        ),
+
+                        "approved": (
+                            approved_providers
+                        ),
+
+                        "verified": (
+                            verified_providers
+                        ),
+
+                        "unverified": (
+                            unverified_providers
+                        ),
+
+                        "pending_approvals": (
+                            pending_providers
+                        ),
+                    },
+                },
+
+                # =============================================
+                # SERVICES
+                # =============================================
+
+                "services": {
+                    "total": (
+                        total_services
+                    ),
+
+                    "active": (
+                        active_services
+                    ),
+
+                    "coming_soon": (
+                        coming_soon_services
+                    ),
+
+                    "inactive": (
+                        inactive_services
+                    ),
+
+                    "popular": (
+                        popular_services
+                    ),
+                },
+
+                # =============================================
+                # REQUESTS
+                # =============================================
+
+                "requests": {
+                    "total": (
+                        total_requests
+                    ),
+
+                    "today": (
+                        requests_today_count
+                    ),
+
+                    "this_week": (
+                        requests_this_week_count
+                    ),
+
+                    "this_month": (
+                        requests_this_month_count
+                    ),
+                },
+
+                # =============================================
+                # QUOTATIONS
+                # =============================================
+
+                "quotations": {
+                    "total": (
+                        total_quotes
+                    ),
+                },
+
+                # =============================================
+                # BOOKINGS
+                # =============================================
+
+                "bookings": {
+                    "total": (
+                        total_bookings
+                    ),
+
+                    "completed": (
+                        completed_bookings
+                    ),
+
+                    "cancelled": (
+                        cancelled_bookings
+                    ),
+
+                    "completion_rate": (
+                        completion_rate
+                    ),
+
+                    "cancellation_rate": (
+                        cancellation_rate
+                    ),
+
+                    "total_booking_value": (
+                        total_booking_value
+                    ),
+
+                    "average_booking_value": (
+                        average_booking_value
+                    ),
+                },
+
+                # =============================================
+                # REVIEWS
+                # =============================================
+
+                "reviews": {
+                    "total": (
+                        total_reviews
+                    ),
+
+                    "average_provider_rating": (
+                        average_provider_rating
+                    ),
+                },
+            },
+        },
+        status=status.HTTP_200_OK,
+    )
+    
+@api_view(["GET"])
+@permission_classes([
+    IsAuthenticated,
+    CanViewReports,
+])
+def dashboard_trends_api(request):
+    """
+    Return booking and booking-value trends
+    for admin dashboard charts.
+
+    Supports:
+        ?period=7d
+        ?period=30d
+        ?period=6m
+        ?period=1y
+        ?from=YYYY-MM-DD
+        ?to=YYYY-MM-DD
+        ?service=plumber
+        ?provider_id=25
+    """
+
+    dashboard_filters = (
+        get_dashboard_filters(request)
+    )
+
+    bookings = (
+        filter_service_bookings(
+            ServiceBooking.objects.all(),
+            dashboard_filters,
+        )
+    )
+
+    period = dashboard_filters["period"]
+
+    # =========================================================
+    # GROUPING
+    # =========================================================
+
+    if period in [
+        "6m",
+        "1y",
+    ]:
+
+        grouped = (
+            bookings
+            .annotate(
+                period_label=TruncMonth(
+                    "created_at"
+                )
+            )
+            .values(
+                "period_label"
+            )
+            .annotate(
+                booking_count=Count("id"),
+
+                completed_bookings=Count(
+                    "id",
+                    filter=Q(
+                        status="completed"
+                    ),
+                ),
+
+                cancelled_bookings=Count(
+                    "id",
+                    filter=Q(
+                        status="cancelled"
+                    ),
+                ),
+
+                booking_value=Sum(
+                    "final_price"
+                ),
+            )
+            .order_by(
+                "period_label"
+            )
+        )
+
+    else:
+
+        grouped = (
+            bookings
+            .annotate(
+                period_label=TruncDate(
+                    "created_at"
+                )
+            )
+            .values(
+                "period_label"
+            )
+            .annotate(
+                booking_count=Count("id"),
+
+                completed_bookings=Count(
+                    "id",
+                    filter=Q(
+                        status="completed"
+                    ),
+                ),
+
+                cancelled_bookings=Count(
+                    "id",
+                    filter=Q(
+                        status="cancelled"
+                    ),
+                ),
+
+                booking_value=Sum(
+                    "final_price"
+                ),
+            )
+            .order_by(
+                "period_label"
+            )
+        )
+
+    # =========================================================
+    # CHART DATA
+    # =========================================================
+
+    labels = []
+    booking_count = []
+    completed_bookings = []
+    cancelled_bookings = []
+    booking_value = []
+
+    for item in grouped:
+
+        label = item["period_label"]
+
+        if period in [
+            "6m",
+            "1y",
+        ]:
+            label = label.strftime(
+                "%b %Y"
+            )
+
+        else:
+            label = label.strftime(
+                "%d %b"
+            )
+
+        labels.append(label)
+
+        booking_count.append(
+            item["booking_count"]
+        )
+
+        completed_bookings.append(
+            item[
+                "completed_bookings"
+            ]
+        )
+
+        cancelled_bookings.append(
+            item[
+                "cancelled_bookings"
+            ]
+        )
+
+        booking_value.append(
+            float(
+                item["booking_value"]
+                or 0
+            )
+        )
+
+    # =========================================================
+    # SUMMARY
+    # =========================================================
+
+    summary = bookings.aggregate(
+        total_booking_value=Sum(
+            "final_price"
+        ),
+        total_bookings=Count(
+            "id"
+        ),
+    )
+
+    total_booking_value = (
+        summary[
+            "total_booking_value"
+        ]
+        or 0
+    )
+
+    total_bookings = (
+        summary[
+            "total_bookings"
+        ]
+        or 0
+    )
+
+    # =========================================================
+    # RESPONSE
+    # =========================================================
+
+    return Response(
+        {
+            "success": True,
+            "message": (
+                "Dashboard trends fetched successfully."
+            ),
+
+            "filters": {
+                "period": (
+                    dashboard_filters[
+                        "period"
+                    ]
+                ),
+
+                "from": (
+                    dashboard_filters[
+                        "start_date"
+                    ]
+                ),
+
+                "to": (
+                    dashboard_filters[
+                        "end_date"
+                    ]
+                ),
+
+                "service": (
+                    dashboard_filters[
+                        "service"
+                    ]
+                ),
+
+                "provider_id": (
+                    dashboard_filters[
+                        "provider_id"
+                    ]
+                ),
+            },
+
+            "summary": {
+                "total_bookings": (
+                    total_bookings
+                ),
+
+                "total_booking_value": (
+                    total_booking_value
+                ),
+            },
+
+            "chart": {
+                "labels": labels,
+
+                "booking_count": (
+                    booking_count
+                ),
+
+                "completed_bookings": (
+                    completed_bookings
+                ),
+
+                "cancelled_bookings": (
+                    cancelled_bookings
+                ),
+
+                "booking_value": (
+                    booking_value
+                ),
+            },
         },
         status=status.HTTP_200_OK,
     )
 
-
 @api_view(["GET"])
-@permission_classes([IsAdminUser])
+@permission_classes([
+    IsAuthenticated,
+    CanManageProviders,
+])
 def pending_providers(request):
+    """
+    Return providers waiting for admin approval.
+    """
 
-    return Response(get_pending_providers_payload(request))
+    providers = (
+        User.objects
+        .filter(
+            role__in=provider_role_keys(),
+            is_approved=False,
+        )
+        .order_by("-date_joined")
+    )
+
+    data = []
+
+    for provider in providers:
+        data.append(
+            {
+                "id": provider.id,
+                "username": provider.username,
+                "email": provider.email,
+                "first_name": provider.first_name,
+                "last_name": provider.last_name,
+                "full_name": (
+                    provider.get_full_name()
+                    or provider.username
+                ),
+                "phone": provider.phone,
+                "address": provider.address,
+                "role": provider.role,
+                "bio": provider.bio,
+                "experience_years": provider.experience_years,
+                "is_email_verified": provider.is_email_verified,
+                "is_approved": provider.is_approved,
+                "is_verified": provider.is_verified,
+                "is_active": provider.is_active,
+                "status_note": provider.status_note or "",
+                "profile_picture": (
+                    request.build_absolute_uri(
+                        provider.profile_picture.url
+                    )
+                    if provider.profile_picture
+                    else None
+                ),
+                "date_joined": provider.date_joined,
+            }
+        )
+
+    return Response(
+        {
+            "success": True,
+            "message": "Pending providers fetched successfully.",
+            "count": len(data),
+            "providers": data,
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 @api_view(["POST"])
@@ -423,9 +1400,6 @@ def update_service_category(
         )
 
     service.name = request.data.get("name", service.name)
-    service.description = request.data.get("description", service.description)
-    service.status = request.data.get("status", service.status)
-    service.start_date = request.data.get("start_date", service.start_date)
 
     service.description = request.data.get(
         "description",
@@ -1151,32 +2125,134 @@ def deactivate_customer(request, customer_id):
     CanManageBookings,
 ])
 def all_bookings(request):
+    """
+    Return all bookings using the new marketplace booking model.
+    """
 
     bookings = (
-        Booking.objects
-        .select_related("service_request", "customer", "provider")
+        ServiceBooking.objects
+        .select_related(
+            "service_request",
+            "service_request__category",
+            "customer",
+            "provider_profile",
+            "provider_profile__provider",
+            "quotation",
+        )
         .order_by("-created_at")
     )
 
-    return Response({
-        "success": True,
-        "bookings": [
+    bookings_data = []
+
+    for booking in bookings:
+
+        provider_user = (
+            booking.provider_profile.provider
+        )
+
+        bookings_data.append(
             {
                 "id": booking.id,
-                "service_request_id": booking.service_request_id,
-                "service_type": booking.service_request.service_type,
-                "customer_id": booking.customer_id,
-                "customer": booking.customer.username,
-                "provider_id": booking.provider_id,
-                "provider": booking.provider.username,
-                "final_price": booking.final_price,
+
+                "service_request_id": str(
+                    booking.service_request.id
+                ),
+
+                "service_request_title": (
+                    booking.service_request.title
+                ),
+
+                "service": {
+                    "id": (
+                        booking.service_request.category.id
+                    ),
+                    "name": (
+                        booking.service_request.category.name
+                    ),
+                    "key": (
+                        booking.service_request.category.key
+                    ),
+                },
+
+                "customer": {
+                    "id": booking.customer.id,
+                    "username": (
+                        booking.customer.username
+                    ),
+                    "email": (
+                        booking.customer.email
+                    ),
+                    "full_name": (
+                        booking.customer.get_full_name()
+                        or booking.customer.username
+                    ),
+                },
+
+                "provider": {
+                    "id": provider_user.id,
+                    "username": (
+                        provider_user.username
+                    ),
+                    "email": (
+                        provider_user.email
+                    ),
+                    "full_name": (
+                        provider_user.get_full_name()
+                        or provider_user.username
+                    ),
+                },
+
+                "quotation_id": (
+                    booking.quotation.id
+                ),
+
+                "final_price": (
+                    booking.final_price
+                ),
+
+                "scheduled_date": (
+                    booking.scheduled_date
+                ),
+
+                "scheduled_start_time": (
+                    booking.scheduled_start_time
+                ),
+
+                "scheduled_end_time": (
+                    booking.scheduled_end_time
+                ),
+
                 "status": booking.status,
-                "created_at": booking.created_at,
-                "updated_at": booking.updated_at,
+
+                "cancellation_reason": (
+                    booking.cancellation_reason
+                ),
+
+                "completed_at": (
+                    booking.completed_at
+                ),
+
+                "created_at": (
+                    booking.created_at
+                ),
+
+                "updated_at": (
+                    booking.updated_at
+                ),
             }
-            for booking in bookings
-        ]
-    })
+        )
+
+    return Response(
+        {
+            "success": True,
+            "message": (
+                "Bookings fetched successfully."
+            ),
+            "count": bookings.count(),
+            "bookings": bookings_data,
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 @api_view(["GET"])
@@ -1185,31 +2261,130 @@ def all_bookings(request):
     CanManageQuotes,
 ])
 def all_quotes(request):
+    """
+    Return all provider quotations using
+    the new marketplace quotation model.
+    """
 
-    quotes = (
-        Quote.objects
-        .select_related("service_request__customer", "provider")
+    quotations = (
+        ProviderQuotation.objects
+        .select_related(
+            "service_request",
+            "service_request__category",
+            "service_request__customer",
+            "provider_profile",
+            "provider_profile__provider",
+        )
         .order_by("-created_at")
     )
 
-    return Response({
-        "success": True,
-        "quotes": [
+    quotations_data = []
+
+    for quotation in quotations:
+
+        provider_user = (
+            quotation.provider_profile.provider
+        )
+
+        customer = (
+            quotation.service_request.customer
+        )
+
+        quotations_data.append(
             {
-                "id": quote.id,
-                "service_request_id": quote.service_request_id,
-                "service_type": quote.service_request.service_type,
-                "customer": quote.service_request.customer.username,
-                "provider_id": quote.provider_id,
-                "provider": quote.provider.username,
-                "price": quote.price,
-                "message": quote.message,
-                "status": quote.status,
-                "created_at": quote.created_at,
+                "id": quotation.id,
+
+                "service_request_id": str(
+                    quotation.service_request.id
+                ),
+
+                "service_request_title": (
+                    quotation.service_request.title
+                ),
+
+                "service": {
+                    "id": (
+                        quotation
+                        .service_request
+                        .category
+                        .id
+                    ),
+                    "name": (
+                        quotation
+                        .service_request
+                        .category
+                        .name
+                    ),
+                    "key": (
+                        quotation
+                        .service_request
+                        .category
+                        .key
+                    ),
+                },
+
+                "customer": {
+                    "id": customer.id,
+                    "username": customer.username,
+                    "email": customer.email,
+                    "full_name": (
+                        customer.get_full_name()
+                        or customer.username
+                    ),
+                },
+
+                "provider": {
+                    "id": provider_user.id,
+                    "username": (
+                        provider_user.username
+                    ),
+                    "email": (
+                        provider_user.email
+                    ),
+                    "full_name": (
+                        provider_user.get_full_name()
+                        or provider_user.username
+                    ),
+                },
+
+                "quoted_price": (
+                    quotation.quoted_price
+                ),
+
+                "message": (
+                    quotation.message
+                ),
+
+                "estimated_duration_minutes": (
+                    quotation
+                    .estimated_duration_minutes
+                ),
+
+                "status": (
+                    quotation.status
+                ),
+
+                "created_at": (
+                    quotation.created_at
+                ),
+
+                "updated_at": (
+                    quotation.updated_at
+                ),
             }
-            for quote in quotes
-        ]
-    })
+        )
+
+    return Response(
+        {
+            "success": True,
+            "message": (
+                "Quotations fetched successfully."
+            ),
+            "count": quotations.count(),
+            "quotes": quotations_data,
+        },
+        status=status.HTTP_200_OK,
+    )
 
 @api_view(["GET"])
 @permission_classes([
@@ -1217,240 +2392,457 @@ def all_quotes(request):
     CanViewReports,
 ])
 def provider_performance(request):
+    """
+    Provider leaderboard and performance analytics.
 
-    providers = list(
-        User.objects
-        .filter(role__in=provider_role_keys())
-        .order_by("username")
-        .only(
-            "id",
-            "username",
-            "email",
-            "phone",
-            "role",
-            "is_active",
-            "is_approved",
-            "is_verified",
-            "profile_picture",
-        )
+    Supports:
+        ?period=7d
+        ?period=30d
+        ?period=6m
+        ?period=1y
+        ?from=YYYY-MM-DD
+        ?to=YYYY-MM-DD
+        ?service=plumber
+    """
+
+    # =========================================================
+    # FILTERS
+    # =========================================================
+
+    dashboard_filters = get_dashboard_filters(
+        request
     )
 
-    provider_ids = [provider.id for provider in providers]
-    if not provider_ids:
-        return Response({"success": True, "providers": []})
-
-    quote_stats = {
-        row["provider_id"]: row
-        for row in Quote.objects.filter(provider_id__in=provider_ids)
-        .values("provider_id")
-        .annotate(
-            total_quotes=Count("id"),
-            accepted_quotes=Count("id", filter=Q(status="accepted")),
-        )
+    # We calculate accepted/completed/cancelled metrics
+    # ourselves, so don't apply generic status filtering.
+    analytics_filters = {
+        **dashboard_filters,
+        "status": None,
+        "provider_id": None,
     }
 
-    booking_stats = {
-        row["provider_id"]: row
-        for row in Booking.objects.filter(provider_id__in=provider_ids)
-        .values("provider_id")
-        .annotate(
-            total_bookings=Count("id"),
-            completed_bookings=Count("id", filter=Q(status="completed")),
-            cancelled_bookings=Count("id", filter=Q(status="cancelled")),
-        )
-    }
+    # =========================================================
+    # PROVIDERS
+    # =========================================================
 
-    review_stats = {
-        row["provider_id"]: row
-        for row in Review.objects.filter(provider_id__in=provider_ids)
-        .values("provider_id")
-        .annotate(
-            total_reviews=Count("id"),
-            average_rating=Avg("rating"),
-        )
-    }
-
-    data = []
-    for provider in providers:
-        quotes = quote_stats.get(provider.id, {})
-        bookings = booking_stats.get(provider.id, {})
-        reviews = review_stats.get(provider.id, {})
-
-        total_quotes = quotes.get("total_quotes", 0)
-        accepted_quotes = quotes.get("accepted_quotes", 0)
-        total_bookings = bookings.get("total_bookings", 0)
-        completed_bookings = bookings.get("completed_bookings", 0)
-        cancelled_bookings = bookings.get("cancelled_bookings", 0)
-        total_reviews = reviews.get("total_reviews", 0)
-        average_rating = round(reviews.get("average_rating") or 0, 1)
-
-        acceptance_rate = round((accepted_quotes / total_quotes) * 100, 2) if total_quotes else 0
-        completion_rate = round((completed_bookings / total_bookings) * 100, 2) if total_bookings else 0
-
-        data.append({
-            "provider_id": provider.id,
-            "provider": provider.username,
-            "email": provider.email,
-            "phone": provider.phone,
-            "role": provider.role,
-            "is_active": provider.is_active,
-            "is_approved": provider.is_approved,
-            "is_verified": provider.is_verified,
-            "profile_picture": (
-                request.build_absolute_uri(provider.profile_picture.url)
-                if provider.profile_picture else None
-            ),
-            "total_quotes": total_quotes,
-            "accepted_quotes": accepted_quotes,
-            "acceptance_rate": acceptance_rate,
-            "total_bookings": total_bookings,
-            "completed_bookings": completed_bookings,
-            "cancelled_bookings": cancelled_bookings,
-            "completion_rate": completion_rate,
-            "total_reviews": total_reviews,
-            "average_rating": average_rating,
-        })
-
-    return Response({
-        "success": True,
-        "providers": data
-    })
-
-
-def _serialize_admin_bookings(bookings, request):
-    return [
-        {
-            "id": booking.id,
-            "service_request_id": booking.service_request_id,
-            "service_type": booking.service_request.service_type,
-            "customer_id": booking.customer_id,
-            "customer": booking.customer.username,
-            "provider_id": booking.provider_id,
-            "provider": booking.provider.username,
-            "final_price": booking.final_price,
-            "status": booking.status,
-            "created_at": booking.created_at,
-            "updated_at": booking.updated_at,
-        }
-        for booking in bookings
-    ]
-
-
-def _serialize_admin_quotes(quotes):
-    return [
-        {
-            "id": quote.id,
-            "service_request_id": quote.service_request_id,
-            "service_type": quote.service_request.service_type,
-            "customer": quote.service_request.customer.username,
-            "provider_id": quote.provider_id,
-            "provider": quote.provider.username,
-            "price": quote.price,
-            "message": quote.message,
-            "status": quote.status,
-            "created_at": quote.created_at,
-        }
-        for quote in quotes
-    ]
-
-
-def _provider_performance_rows(request):
-    providers = list(
+    providers = (
         User.objects
-        .filter(role__in=provider_role_keys())
-        .order_by("username")
-        .only(
-            "id",
-            "username",
-            "email",
-            "phone",
-            "role",
-            "is_active",
-            "is_approved",
-            "is_verified",
-            "profile_picture",
+        .filter(
+            role__in=provider_role_keys()
         )
+        .order_by("username")
     )
 
-    provider_ids = [provider.id for provider in providers]
-    if not provider_ids:
-        return []
-
-    quote_stats = {
-        row["provider_id"]: row
-        for row in Quote.objects.filter(provider_id__in=provider_ids)
-        .values("provider_id")
-        .annotate(
-            total_quotes=Count("id"),
-            accepted_quotes=Count("id", filter=Q(status="accepted")),
-        )
-    }
-
-    booking_stats = {
-        row["provider_id"]: row
-        for row in Booking.objects.filter(provider_id__in=provider_ids)
-        .values("provider_id")
-        .annotate(
-            total_bookings=Count("id"),
-            completed_bookings=Count("id", filter=Q(status="completed")),
-            cancelled_bookings=Count("id", filter=Q(status="cancelled")),
-        )
-    }
-
-    review_stats = {
-        row["provider_id"]: row
-        for row in Review.objects.filter(provider_id__in=provider_ids)
-        .values("provider_id")
-        .annotate(
-            total_reviews=Count("id"),
-            average_rating=Avg("rating"),
-        )
-    }
-
     data = []
+
     for provider in providers:
-        quotes = quote_stats.get(provider.id, {})
-        bookings = booking_stats.get(provider.id, {})
-        reviews = review_stats.get(provider.id, {})
 
-        total_quotes = quotes.get("total_quotes", 0)
-        accepted_quotes = quotes.get("accepted_quotes", 0)
-        total_bookings = bookings.get("total_bookings", 0)
-        completed_bookings = bookings.get("completed_bookings", 0)
-        cancelled_bookings = bookings.get("cancelled_bookings", 0)
-        total_reviews = reviews.get("total_reviews", 0)
-        average_rating = round(reviews.get("average_rating") or 0, 1)
+        # =====================================================
+        # QUOTATIONS
+        # =====================================================
 
-        acceptance_rate = round((accepted_quotes / total_quotes) * 100, 2) if total_quotes else 0
-        completion_rate = round((completed_bookings / total_bookings) * 100, 2) if total_bookings else 0
+        quotations = (
+            ProviderQuotation.objects
+            .filter(
+                provider_profile__provider=provider
+            )
+        )
 
-        data.append({
-            "provider_id": provider.id,
-            "provider": provider.username,
-            "email": provider.email,
-            "phone": provider.phone,
-            "role": provider.role,
-            "is_active": provider.is_active,
-            "is_approved": provider.is_approved,
-            "is_verified": provider.is_verified,
-            "profile_picture": (
-                request.build_absolute_uri(provider.profile_picture.url)
-                if provider.profile_picture else None
+        quotations = (
+            filter_provider_quotations(
+                quotations,
+                analytics_filters,
+            )
+        )
+
+        total_quotes = quotations.count()
+
+        accepted_quotes = (
+            quotations
+            .filter(
+                status="accepted"
+            )
+            .count()
+        )
+
+        # =====================================================
+        # BOOKINGS
+        # =====================================================
+
+        bookings = (
+            ServiceBooking.objects
+            .filter(
+                provider_profile__provider=provider
+            )
+        )
+
+        bookings = (
+            filter_service_bookings(
+                bookings,
+                analytics_filters,
+            )
+        )
+
+        total_bookings = bookings.count()
+
+        completed_bookings = (
+            bookings
+            .filter(
+                status="completed"
+            )
+            .count()
+        )
+
+        cancelled_bookings = (
+            bookings
+            .filter(
+                status="cancelled"
+            )
+            .count()
+        )
+
+        # =====================================================
+        # BOOKING VALUE
+        # =====================================================
+
+        # Cancelled bookings are excluded from
+        # provider booking-value calculations.
+
+        booking_value_data = (
+            bookings
+            .exclude(
+                status="cancelled"
+            )
+            .aggregate(
+                total=Sum(
+                    "final_price"
+                ),
+                average=Avg(
+                    "final_price"
+                ),
+            )
+        )
+
+        total_booking_value = (
+            booking_value_data["total"]
+            or 0
+        )
+
+        average_booking_value = (
+            booking_value_data["average"]
+            or 0
+        )
+
+        # =====================================================
+        # REVIEWS
+        # =====================================================
+
+        reviews = (
+            ServiceReview.objects
+            .filter(
+                provider_profile__provider=provider
+            )
+        )
+
+        reviews = (
+            filter_service_reviews(
+                reviews,
+                analytics_filters,
+            )
+        )
+
+        total_reviews = reviews.count()
+
+        rating_data = (
+            reviews.aggregate(
+                average=Avg(
+                    "rating"
+                )
+            )
+        )
+
+        average_rating = (
+            rating_data["average"]
+            or 0
+        )
+
+        average_rating = round(
+            float(average_rating),
+            2,
+        )
+
+        # =====================================================
+        # QUOTATION ACCEPTANCE RATE
+        # =====================================================
+
+        quotation_acceptance_rate = 0
+
+        if total_quotes > 0:
+            quotation_acceptance_rate = round(
+                (
+                    accepted_quotes
+                    / total_quotes
+                )
+                * 100,
+                2,
+            )
+
+        # =====================================================
+        # COMPLETION RATE
+        # =====================================================
+
+        completion_rate = 0
+
+        if total_bookings > 0:
+            completion_rate = round(
+                (
+                    completed_bookings
+                    / total_bookings
+                )
+                * 100,
+                2,
+            )
+
+        # =====================================================
+        # CANCELLATION RATE
+        # =====================================================
+
+        cancellation_rate = 0
+
+        if total_bookings > 0:
+            cancellation_rate = round(
+                (
+                    cancelled_bookings
+                    / total_bookings
+                )
+                * 100,
+                2,
+            )
+
+        # =====================================================
+        # PROVIDER DATA
+        # =====================================================
+
+        data.append(
+            {
+                "provider_id": provider.id,
+
+                "provider": provider.username,
+
+                "full_name": (
+                    provider.get_full_name()
+                    or provider.username
+                ),
+
+                "email": provider.email,
+
+                "phone": provider.phone,
+
+                "role": provider.role,
+
+                "is_active": (
+                    provider.is_active
+                ),
+
+                "is_approved": (
+                    provider.is_approved
+                ),
+
+                "is_verified": (
+                    provider.is_verified
+                ),
+
+                "profile_picture": (
+                    request.build_absolute_uri(
+                        provider.profile_picture.url
+                    )
+                    if provider.profile_picture
+                    else None
+                ),
+
+                # ---------------------------------------------
+                # QUOTATIONS
+                # ---------------------------------------------
+
+                "total_quotes": (
+                    total_quotes
+                ),
+
+                "accepted_quotes": (
+                    accepted_quotes
+                ),
+
+                "quotation_acceptance_rate": (
+                    quotation_acceptance_rate
+                ),
+
+                # Keep old field for frontend compatibility.
+                "acceptance_rate": (
+                    quotation_acceptance_rate
+                ),
+
+                # ---------------------------------------------
+                # BOOKINGS
+                # ---------------------------------------------
+
+                "total_bookings": (
+                    total_bookings
+                ),
+
+                "completed_bookings": (
+                    completed_bookings
+                ),
+
+                "cancelled_bookings": (
+                    cancelled_bookings
+                ),
+
+                "completion_rate": (
+                    completion_rate
+                ),
+
+                "cancellation_rate": (
+                    cancellation_rate
+                ),
+
+                "total_booking_value": (
+                    total_booking_value
+                ),
+
+                "average_booking_value": (
+                    average_booking_value
+                ),
+
+                # ---------------------------------------------
+                # REVIEWS
+                # ---------------------------------------------
+
+                "total_reviews": (
+                    total_reviews
+                ),
+
+                "average_rating": (
+                    average_rating
+                ),
+            }
+        )
+
+    # =========================================================
+    # LEADERBOARD RANKING
+    # =========================================================
+    #
+    # Ranking priority:
+    # 1. Completed bookings
+    # 2. Total booking value
+    # 3. Average rating
+    # 4. Quotation acceptance rate
+    #
+
+    data.sort(
+        key=lambda item: (
+            item["completed_bookings"],
+            float(
+                item["total_booking_value"]
             ),
-            "total_quotes": total_quotes,
-            "accepted_quotes": accepted_quotes,
-            "acceptance_rate": acceptance_rate,
-            "total_bookings": total_bookings,
-            "completed_bookings": completed_bookings,
-            "cancelled_bookings": cancelled_bookings,
-            "completion_rate": completion_rate,
-            "total_reviews": total_reviews,
-            "average_rating": average_rating,
-        })
+            item["average_rating"],
+            item[
+                "quotation_acceptance_rate"
+            ],
+        ),
+        reverse=True,
+    )
 
-    return data
+    for index, provider_data in enumerate(
+        data,
+        start=1,
+    ):
+        provider_data["rank"] = index
 
+    # =========================================================
+    # SUMMARY
+    # =========================================================
 
+    total_provider_booking_value = sum(
+        (
+            item["total_booking_value"]
+            for item in data
+        ),
+        start=0,
+    )
+
+    total_completed_jobs = sum(
+        item["completed_bookings"]
+        for item in data
+    )
+
+    total_cancelled_jobs = sum(
+        item["cancelled_bookings"]
+        for item in data
+    )
+
+    # =========================================================
+    # RESPONSE
+    # =========================================================
+
+    return Response(
+        {
+            "success": True,
+
+            "message": (
+                "Provider leaderboard and "
+                "performance fetched successfully."
+            ),
+
+            "filters": {
+                "period": (
+                    dashboard_filters[
+                        "period"
+                    ]
+                ),
+
+                "from": (
+                    dashboard_filters[
+                        "start_date"
+                    ]
+                ),
+
+                "to": (
+                    dashboard_filters[
+                        "end_date"
+                    ]
+                ),
+
+                "service": (
+                    dashboard_filters[
+                        "service"
+                    ]
+                ),
+            },
+
+            "summary": {
+                "total_providers": (
+                    len(data)
+                ),
+
+                "total_completed_jobs": (
+                    total_completed_jobs
+                ),
+
+                "total_cancelled_jobs": (
+                    total_cancelled_jobs
+                ),
+
+                "total_booking_value": (
+                    total_provider_booking_value
+                ),
+            },
+
+            "count": len(data),
+
+            "providers": data,
+        },
+        status=status.HTTP_200_OK,
+    )
 @api_view(["GET"])
 @permission_classes([
     IsAuthenticated,
@@ -1458,24 +2850,170 @@ def _provider_performance_rows(request):
 ])
 def marketplace_monitor_api(request):
     """
-    Bookings, quotes, and provider performance in one round trip.
-    Optional ?sections=bookings,quotes,providers for partial loads.
+    Return recent bookings, quotations, and provider summary.
+
+    Optional:
+        ?sections=bookings,quotes,providers
     """
-    sections_param = request.query_params.get("sections", "").strip()
-    sections = None
-    if sections_param:
-        sections = {part.strip() for part in sections_param.split(",") if part.strip()}
+
+    sections_param = (
+        request.query_params.get("sections", "")
+        or ""
+    ).strip()
+
+    sections = {
+        part.strip().lower()
+        for part in sections_param.split(",")
+        if part.strip()
+    }
+
+    include_all = not sections
+    payload = {}
+
+    if include_all or "bookings" in sections:
+        bookings = (
+            ServiceBooking.objects
+            .select_related(
+                "service_request",
+                "service_request__category",
+                "customer",
+                "provider_profile",
+                "provider_profile__provider",
+            )
+            .order_by("-created_at")[:50]
+        )
+
+        payload["bookings"] = [
+            {
+                "id": booking.id,
+                "service_request_id": str(
+                    booking.service_request.id
+                ),
+                "service": {
+                    "id": booking.service_request.category.id,
+                    "name": booking.service_request.category.name,
+                    "key": booking.service_request.category.key,
+                },
+                "customer": {
+                    "id": booking.customer.id,
+                    "username": booking.customer.username,
+                },
+                "provider": {
+                    "id": booking.provider_profile.provider.id,
+                    "username": (
+                        booking.provider_profile.provider.username
+                    ),
+                },
+                "final_price": booking.final_price,
+                "status": booking.status,
+                "created_at": booking.created_at,
+            }
+            for booking in bookings
+        ]
+
+    if include_all or "quotes" in sections:
+        quotations = (
+            ProviderQuotation.objects
+            .select_related(
+                "service_request",
+                "service_request__category",
+                "service_request__customer",
+                "provider_profile",
+                "provider_profile__provider",
+            )
+            .order_by("-created_at")[:50]
+        )
+
+        payload["quotes"] = [
+            {
+                "id": quotation.id,
+                "service_request_id": str(
+                    quotation.service_request.id
+                ),
+                "service": {
+                    "id": quotation.service_request.category.id,
+                    "name": quotation.service_request.category.name,
+                    "key": quotation.service_request.category.key,
+                },
+                "customer": {
+                    "id": quotation.service_request.customer.id,
+                    "username": (
+                        quotation.service_request.customer.username
+                    ),
+                },
+                "provider": {
+                    "id": quotation.provider_profile.provider.id,
+                    "username": (
+                        quotation.provider_profile.provider.username
+                    ),
+                },
+                "quoted_price": quotation.quoted_price,
+                "status": quotation.status,
+                "created_at": quotation.created_at,
+            }
+            for quotation in quotations
+        ]
+
+    if include_all or "providers" in sections:
+        providers = (
+            User.objects
+            .filter(role__in=provider_role_keys())
+            .order_by("username")
+        )
+
+        provider_rows = []
+
+        for provider in providers:
+            provider_bookings = ServiceBooking.objects.filter(
+                provider_profile__provider=provider
+            )
+            provider_quotes = ProviderQuotation.objects.filter(
+                provider_profile__provider=provider
+            )
+            provider_reviews = ServiceReview.objects.filter(
+                provider_profile__provider=provider
+            )
+
+            provider_rows.append(
+                {
+                    "provider_id": provider.id,
+                    "provider": provider.username,
+                    "role": provider.role,
+                    "total_quotes": provider_quotes.count(),
+                    "accepted_quotes": provider_quotes.filter(
+                        status="accepted"
+                    ).count(),
+                    "total_bookings": provider_bookings.count(),
+                    "completed_bookings": provider_bookings.filter(
+                        status="completed"
+                    ).count(),
+                    "cancelled_bookings": provider_bookings.filter(
+                        status="cancelled"
+                    ).count(),
+                    "average_rating": round(
+                        float(
+                            provider_reviews.aggregate(
+                                average=Avg("rating")
+                            )["average"]
+                            or 0
+                        ),
+                        2,
+                    ),
+                }
+            )
+
+        payload["providers"] = provider_rows
 
     return Response(
-        get_marketplace_monitor_payload(request, sections),
+        {
+            "success": True,
+            "message": "Marketplace monitor fetched successfully.",
+            "data": payload,
+        },
         status=status.HTTP_200_OK,
     )
 
 
-from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
 
 from .models import SpotlightImage
 from .serializers import AdminUserSerializer, CreateAdminUserSerializer, SpotlightImageSerializer, UpdateAdminUserSerializer
@@ -1676,14 +3214,85 @@ def public_spotlights_api(request):
 @permission_classes([AllowAny])
 def home_catalog_api(request):
     """
-    Single response for public home pages: active, popular, coming soon services + spotlights.
+    Public home catalog:
+    active services, popular services,
+    coming-soon services, and spotlights.
     """
-    payload = build_home_catalog_payload(request)
+
+    active_services = (
+        ServiceCategory.objects
+        .filter(status="active")
+        .order_by("display_order", "name")
+    )
+
+    popular_services = (
+        ServiceCategory.objects
+        .filter(
+            status="active",
+            is_popular=True,
+        )
+        .order_by("display_order", "name")
+    )
+
+    coming_soon_services = (
+        ServiceCategory.objects
+        .filter(status="coming_soon")
+        .order_by("display_order", "name")
+    )
+
+    spotlights = (
+        SpotlightImage.objects
+        .filter(is_active=True)
+        .order_by("display_order", "-created_at")
+    )
+
+    def serialize_service(service):
+        return {
+            "id": service.id,
+            "name": service.name,
+            "key": service.key,
+            "description": service.description,
+            "service_image": (
+                request.build_absolute_uri(
+                    service.service_image.url
+                )
+                if service.service_image
+                else None
+            ),
+            "status": service.status,
+            "start_date": service.start_date,
+            "display_order": service.display_order,
+            "is_popular": service.is_popular,
+            "is_available": (
+                service.status == "active"
+            ),
+        }
+
+    serializer = SpotlightImageSerializer(
+        spotlights,
+        many=True,
+        context={"request": request},
+    )
+
     return Response(
         {
             "success": True,
             "message": "Home catalog fetched successfully.",
-            "data": payload,
+            "data": {
+                "active_services": [
+                    serialize_service(service)
+                    for service in active_services
+                ],
+                "popular_services": [
+                    serialize_service(service)
+                    for service in popular_services
+                ],
+                "coming_soon_services": [
+                    serialize_service(service)
+                    for service in coming_soon_services
+                ],
+                "spotlights": serializer.data,
+            },
         },
         status=status.HTTP_200_OK,
     )
@@ -1742,7 +3351,6 @@ def popular_services_api(request):
         },
         status=status.HTTP_200_OK,
     )
-from django.db.models import Q
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def public_services_api(request):
@@ -2847,6 +4455,1568 @@ def update_provider_api(request, provider_id):
                 "is_verified": provider.is_verified,
                 "is_active": provider.is_active,
             },
+        },
+        status=status.HTTP_200_OK,
+    )
+
+@api_view(["GET"])
+@permission_classes([
+    IsAuthenticated,
+    CanViewReports,
+])
+def service_performance_api(request):
+    """
+    Return performance analytics for marketplace services.
+
+    Supports:
+        ?period=7d
+        ?period=30d
+        ?period=6m
+        ?period=1y
+        ?from=YYYY-MM-DD
+        ?to=YYYY-MM-DD
+        ?service=plumber
+    """
+
+    dashboard_filters = get_dashboard_filters(
+        request
+    )
+
+    # We calculate status-specific metrics ourselves below.
+    # Do not let a generic ?status filter accidentally
+    # remove completed/cancelled bookings before aggregation.
+    analytics_filters = {
+        **dashboard_filters,
+        "status": None,
+    }
+
+    # =========================================================
+    # SERVICE QUERYSET
+    # =========================================================
+
+    services = (
+        ServiceCategory.objects
+        .all()
+        .order_by(
+            "display_order",
+            "name",
+        )
+    )
+
+    # If a particular service was requested,
+    # return analytics only for that service.
+
+    service_filter = dashboard_filters.get(
+        "service"
+    )
+
+    if service_filter:
+        services = services.filter(
+            key__iexact=service_filter
+        )
+
+    data = []
+
+    # =========================================================
+    # SERVICE PERFORMANCE
+    # =========================================================
+
+    for service in services:
+
+        # -----------------------------------------------------
+        # REQUESTS
+        # -----------------------------------------------------
+
+        requests_queryset = (
+            CustomerServiceRequest.objects
+            .filter(
+                category=service
+            )
+        )
+
+        requests_queryset = (
+            filter_service_requests(
+                requests_queryset,
+                analytics_filters,
+            )
+        )
+
+        total_requests = (
+            requests_queryset.count()
+        )
+
+        # -----------------------------------------------------
+        # QUOTATIONS
+        # -----------------------------------------------------
+
+        quotations_queryset = (
+            ProviderQuotation.objects
+            .filter(
+                service_request__category=service
+            )
+        )
+
+        quotations_queryset = (
+            filter_provider_quotations(
+                quotations_queryset,
+                analytics_filters,
+            )
+        )
+
+        total_quotations = (
+            quotations_queryset.count()
+        )
+
+        accepted_quotations = (
+            quotations_queryset
+            .filter(
+                status="accepted"
+            )
+            .count()
+        )
+
+        # -----------------------------------------------------
+        # BOOKINGS
+        # -----------------------------------------------------
+
+        bookings_queryset = (
+            ServiceBooking.objects
+            .filter(
+                service_request__category=service
+            )
+        )
+
+        bookings_queryset = (
+            filter_service_bookings(
+                bookings_queryset,
+                analytics_filters,
+            )
+        )
+
+        total_bookings = (
+            bookings_queryset.count()
+        )
+
+        completed_jobs = (
+            bookings_queryset
+            .filter(
+                status="completed"
+            )
+            .count()
+        )
+
+        cancelled_jobs = (
+            bookings_queryset
+            .filter(
+                status="cancelled"
+            )
+            .count()
+        )
+
+        # -----------------------------------------------------
+        # BOOKING VALUE
+        # -----------------------------------------------------
+
+        booking_value_result = (
+            bookings_queryset
+            .exclude(
+                status="cancelled"
+            )
+            .aggregate(
+                total=Sum(
+                    "final_price"
+                )
+            )
+        )
+
+        total_booking_value = (
+            booking_value_result["total"]
+            or 0
+        )
+
+        # -----------------------------------------------------
+        # REVIEWS
+        # -----------------------------------------------------
+
+        reviews_queryset = (
+            ServiceReview.objects
+            .filter(
+                booking__service_request__category=service
+            )
+        )
+
+        reviews_queryset = (
+            filter_service_reviews(
+                reviews_queryset,
+                analytics_filters,
+            )
+        )
+
+        total_reviews = (
+            reviews_queryset.count()
+        )
+
+        rating_result = (
+            reviews_queryset.aggregate(
+                average=Avg(
+                    "rating"
+                )
+            )
+        )
+
+        average_rating = (
+            rating_result["average"]
+            or 0
+        )
+
+        average_rating = round(
+            float(average_rating),
+            2,
+        )
+
+        # -----------------------------------------------------
+        # REQUEST -> BOOKING CONVERSION RATE
+        # -----------------------------------------------------
+
+        conversion_rate = 0
+
+        if total_requests > 0:
+            conversion_rate = round(
+                (
+                    total_bookings
+                    / total_requests
+                )
+                * 100,
+                2,
+            )
+
+        # -----------------------------------------------------
+        # QUOTATION ACCEPTANCE RATE
+        # -----------------------------------------------------
+
+        quotation_acceptance_rate = 0
+
+        if total_quotations > 0:
+            quotation_acceptance_rate = round(
+                (
+                    accepted_quotations
+                    / total_quotations
+                )
+                * 100,
+                2,
+            )
+
+        # -----------------------------------------------------
+        # COMPLETION RATE
+        # -----------------------------------------------------
+
+        completion_rate = 0
+
+        if total_bookings > 0:
+            completion_rate = round(
+                (
+                    completed_jobs
+                    / total_bookings
+                )
+                * 100,
+                2,
+            )
+
+        # -----------------------------------------------------
+        # CANCELLATION RATE
+        # -----------------------------------------------------
+
+        cancellation_rate = 0
+
+        if total_bookings > 0:
+            cancellation_rate = round(
+                (
+                    cancelled_jobs
+                    / total_bookings
+                )
+                * 100,
+                2,
+            )
+
+        # -----------------------------------------------------
+        # RESPONSE ITEM
+        # -----------------------------------------------------
+
+        data.append(
+            {
+                "service_id": service.id,
+                "service_name": service.name,
+                "service_key": service.key,
+                "status": service.status,
+                "is_popular": service.is_popular,
+
+                "total_requests": total_requests,
+
+                "total_quotations": (
+                    total_quotations
+                ),
+
+                "accepted_quotations": (
+                    accepted_quotations
+                ),
+
+                "quotation_acceptance_rate": (
+                    quotation_acceptance_rate
+                ),
+
+                "total_bookings": (
+                    total_bookings
+                ),
+
+                "completed_jobs": (
+                    completed_jobs
+                ),
+
+                "cancelled_jobs": (
+                    cancelled_jobs
+                ),
+
+                "completion_rate": (
+                    completion_rate
+                ),
+
+                "cancellation_rate": (
+                    cancellation_rate
+                ),
+
+                "total_booking_value": (
+                    total_booking_value
+                ),
+
+                "total_reviews": (
+                    total_reviews
+                ),
+
+                "average_rating": (
+                    average_rating
+                ),
+
+                "conversion_rate": (
+                    conversion_rate
+                ),
+            }
+        )
+
+    # =========================================================
+    # RANK SERVICES
+    # =========================================================
+
+    data.sort(
+        key=lambda item: (
+            item["total_bookings"],
+            float(item["total_booking_value"]),
+            item["average_rating"],
+        ),
+        reverse=True,
+    )
+
+    for index, item in enumerate(
+        data,
+        start=1,
+    ):
+        item["rank"] = index
+
+    # =========================================================
+    # RESPONSE
+    # =========================================================
+
+    return Response(
+        {
+            "success": True,
+            "message": (
+                "Service performance analytics "
+                "fetched successfully."
+            ),
+
+            "filters": {
+                "period": (
+                    dashboard_filters["period"]
+                ),
+
+                "from": (
+                    dashboard_filters[
+                        "start_date"
+                    ]
+                ),
+
+                "to": (
+                    dashboard_filters[
+                        "end_date"
+                    ]
+                ),
+
+                "service": (
+                    dashboard_filters["service"]
+                ),
+            },
+
+            "count": len(data),
+
+            "services": data,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+@api_view(["GET"])
+@permission_classes([
+    IsAuthenticated,
+    CanViewReports,
+])
+def service_request_funnel_api(request):
+    """
+    Marketplace conversion funnel.
+
+    Supports:
+        ?period=7d
+        ?period=30d
+        ?period=6m
+        ?period=1y
+        ?from=YYYY-MM-DD
+        ?to=YYYY-MM-DD
+        ?service=plumber
+    """
+
+    dashboard_filters = get_dashboard_filters(
+        request
+    )
+
+    # We calculate stage statuses ourselves.
+    analytics_filters = {
+        **dashboard_filters,
+        "status": None,
+        "provider_id": None,
+    }
+
+    # =========================================================
+    # REQUESTS
+    # =========================================================
+
+    requests_queryset = filter_service_requests(
+        CustomerServiceRequest.objects.all(),
+        analytics_filters,
+    )
+
+    total_requests = requests_queryset.count()
+
+    request_ids = requests_queryset.values_list(
+        "id",
+        flat=True,
+    )
+
+    # =========================================================
+    # QUOTED REQUESTS
+    # =========================================================
+    # Count requests that received at least one quotation,
+    # not the total number of quotations.
+
+    quoted_requests = (
+        ProviderQuotation.objects
+        .filter(
+            service_request_id__in=request_ids
+        )
+        .values(
+            "service_request_id"
+        )
+        .distinct()
+        .count()
+    )
+
+    # =========================================================
+    # ACCEPTED / BOOKED REQUESTS
+    # =========================================================
+    # A booking represents a request that successfully
+    # progressed beyond quotation selection.
+
+    booking_queryset = (
+        ServiceBooking.objects
+        .filter(
+            service_request_id__in=request_ids
+        )
+    )
+
+    accepted_requests = (
+        booking_queryset
+        .values(
+            "service_request_id"
+        )
+        .distinct()
+        .count()
+    )
+
+    # =========================================================
+    # IN-PROGRESS REQUESTS
+    # =========================================================
+
+    in_progress_requests = (
+        booking_queryset
+        .filter(
+            status="in_progress"
+        )
+        .values(
+            "service_request_id"
+        )
+        .distinct()
+        .count()
+    )
+
+    # =========================================================
+    # COMPLETED REQUESTS
+    # =========================================================
+
+    completed_requests = (
+        booking_queryset
+        .filter(
+            status="completed"
+        )
+        .values(
+            "service_request_id"
+        )
+        .distinct()
+        .count()
+    )
+
+    # =========================================================
+    # CANCELLED REQUESTS
+    # =========================================================
+
+    cancelled_requests = (
+        booking_queryset
+        .filter(
+            status="cancelled"
+        )
+        .values(
+            "service_request_id"
+        )
+        .distinct()
+        .count()
+    )
+
+    # =========================================================
+    # HELPER FUNCTIONS
+    # =========================================================
+
+    def percentage(value, total):
+        if total <= 0:
+            return 0
+
+        return round(
+            (value / total) * 100,
+            2,
+        )
+
+    def drop_off(previous, current):
+        if previous <= 0:
+            return 0
+
+        return round(
+            (
+                (previous - current)
+                / previous
+            )
+            * 100,
+            2,
+        )
+
+    # =========================================================
+    # FUNNEL
+    # =========================================================
+
+    funnel = [
+        {
+            "stage": "requests",
+            "label": "Requests",
+            "count": total_requests,
+            "overall_conversion_rate": 100.0,
+            "previous_stage_conversion_rate": 100.0,
+            "drop_off_rate": 0,
+        },
+        {
+            "stage": "quoted",
+            "label": "Quoted",
+            "count": quoted_requests,
+            "overall_conversion_rate": percentage(
+                quoted_requests,
+                total_requests,
+            ),
+            "previous_stage_conversion_rate": percentage(
+                quoted_requests,
+                total_requests,
+            ),
+            "drop_off_rate": drop_off(
+                total_requests,
+                quoted_requests,
+            ),
+        },
+        {
+            "stage": "accepted",
+            "label": "Accepted / Booked",
+            "count": accepted_requests,
+            "overall_conversion_rate": percentage(
+                accepted_requests,
+                total_requests,
+            ),
+            "previous_stage_conversion_rate": percentage(
+                accepted_requests,
+                quoted_requests,
+            ),
+            "drop_off_rate": drop_off(
+                quoted_requests,
+                accepted_requests,
+            ),
+        },
+        {
+            "stage": "in_progress",
+            "label": "In Progress",
+            "count": in_progress_requests,
+            "overall_conversion_rate": percentage(
+                in_progress_requests,
+                total_requests,
+            ),
+            "previous_stage_conversion_rate": percentage(
+                in_progress_requests,
+                accepted_requests,
+            ),
+            "drop_off_rate": drop_off(
+                accepted_requests,
+                in_progress_requests,
+            ),
+        },
+        {
+            "stage": "completed",
+            "label": "Completed",
+            "count": completed_requests,
+            "overall_conversion_rate": percentage(
+                completed_requests,
+                total_requests,
+            ),
+            "previous_stage_conversion_rate": percentage(
+                completed_requests,
+                in_progress_requests,
+            ),
+            "drop_off_rate": drop_off(
+                in_progress_requests,
+                completed_requests,
+            ),
+        },
+    ]
+
+    # =========================================================
+    # RESPONSE
+    # =========================================================
+
+    return Response(
+        {
+            "success": True,
+            "message": (
+                "Service request funnel "
+                "fetched successfully."
+            ),
+
+            "filters": {
+                "period": dashboard_filters["period"],
+                "from": dashboard_filters["start_date"],
+                "to": dashboard_filters["end_date"],
+                "service": dashboard_filters["service"],
+            },
+
+            "summary": {
+                "total_requests": total_requests,
+                "quoted_requests": quoted_requests,
+                "accepted_requests": accepted_requests,
+                "in_progress_requests": in_progress_requests,
+                "completed_requests": completed_requests,
+                "cancelled_requests": cancelled_requests,
+
+                "request_to_booking_rate": percentage(
+                    accepted_requests,
+                    total_requests,
+                ),
+
+                "request_to_completion_rate": percentage(
+                    completed_requests,
+                    total_requests,
+                ),
+            },
+
+            "funnel": funnel,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+@api_view(["GET"])
+@permission_classes([
+    IsAuthenticated,
+    CanViewReports,
+])
+def customer_analytics_api(request):
+    """
+    Customer analytics for the admin dashboard.
+
+    Supports:
+        ?period=7d
+        ?period=30d
+        ?period=6m
+        ?period=1y
+        ?from=YYYY-MM-DD
+        ?to=YYYY-MM-DD
+        ?service=plumber
+    """
+
+    dashboard_filters = get_dashboard_filters(
+        request
+    )
+
+    analytics_filters = {
+        **dashboard_filters,
+        "status": None,
+        "provider_id": None,
+    }
+
+    # =========================================================
+    # ALL CUSTOMERS
+    # =========================================================
+
+    customers = (
+        User.objects
+        .filter(
+            role="customer"
+        )
+    )
+
+    total_customers = customers.count()
+
+    active_customers = (
+        customers
+        .filter(
+            is_active=True
+        )
+        .count()
+    )
+
+    inactive_customers = (
+        customers
+        .filter(
+            is_active=False
+        )
+        .count()
+    )
+
+    # =========================================================
+    # NEW CUSTOMERS IN SELECTED PERIOD
+    # =========================================================
+
+    start_date = dashboard_filters.get(
+        "start_date"
+    )
+
+    end_date = dashboard_filters.get(
+        "end_date"
+    )
+
+    new_customers_queryset = customers
+
+    if start_date:
+        new_customers_queryset = (
+            new_customers_queryset
+            .filter(
+                date_joined__date__gte=start_date
+            )
+        )
+
+    if end_date:
+        new_customers_queryset = (
+            new_customers_queryset
+            .filter(
+                date_joined__date__lte=end_date
+            )
+        )
+
+    new_customers = (
+        new_customers_queryset.count()
+    )
+
+    # =========================================================
+    # FILTERED BOOKINGS
+    # =========================================================
+
+    bookings = (
+        filter_service_bookings(
+            ServiceBooking.objects.all(),
+            analytics_filters,
+        )
+    )
+
+    # =========================================================
+    # CUSTOMERS WITH BOOKINGS
+    # =========================================================
+
+    customer_ids_with_bookings = (
+        bookings
+        .values_list(
+            "customer_id",
+            flat=True,
+        )
+        .distinct()
+    )
+
+    customers_with_bookings = (
+        customers
+        .filter(
+            id__in=customer_ids_with_bookings
+        )
+        .count()
+    )
+
+    customers_with_no_bookings = (
+        total_customers
+        - customers_with_bookings
+    )
+
+    # =========================================================
+    # REPEAT CUSTOMERS
+    # =========================================================
+    # Repeat customer = customer with at least 2 bookings
+    # in the selected analytics period.
+
+    repeat_customer_rows = (
+        bookings
+        .values(
+            "customer_id"
+        )
+        .annotate(
+            booking_count=Count("id")
+        )
+        .filter(
+            booking_count__gte=2
+        )
+    )
+
+    repeat_customers = (
+        repeat_customer_rows.count()
+    )
+
+    # =========================================================
+    # REPEAT BOOKING RATE
+    # =========================================================
+
+    repeat_booking_rate = 0
+
+    if customers_with_bookings > 0:
+        repeat_booking_rate = round(
+            (
+                repeat_customers
+                / customers_with_bookings
+            )
+            * 100,
+            2,
+        )
+
+    # =========================================================
+    # CUSTOMER BOOKING ANALYTICS
+    # =========================================================
+
+    customer_booking_data = (
+        bookings
+        .values(
+            "customer_id"
+        )
+        .annotate(
+            total_bookings=Count(
+                "id"
+            ),
+
+            completed_bookings=Count(
+                "id",
+                filter=Q(
+                    status="completed"
+                ),
+            ),
+
+            cancelled_bookings=Count(
+                "id",
+                filter=Q(
+                    status="cancelled"
+                ),
+            ),
+
+            total_spend=Sum(
+                "final_price",
+                filter=~Q(
+                    status="cancelled"
+                ),
+            ),
+
+            average_booking_value=Avg(
+                "final_price",
+                filter=~Q(
+                    status="cancelled"
+                ),
+            ),
+        )
+    )
+
+    # =========================================================
+    # BUILD TOP CUSTOMER DATA
+    # =========================================================
+
+    customer_map = {
+        customer.id: customer
+        for customer in customers
+    }
+
+    top_customers = []
+
+    for item in customer_booking_data:
+
+        customer = customer_map.get(
+            item["customer_id"]
+        )
+
+        if not customer:
+            continue
+
+        total_spend = (
+            item["total_spend"]
+            or 0
+        )
+
+        average_booking_value = (
+            item["average_booking_value"]
+            or 0
+        )
+
+        top_customers.append(
+            {
+                "customer_id": customer.id,
+
+                "username": (
+                    customer.username
+                ),
+
+                "full_name": (
+                    customer.get_full_name()
+                    or customer.username
+                ),
+
+                "email": customer.email,
+
+                "phone": customer.phone,
+
+                "is_active": (
+                    customer.is_active
+                ),
+
+                "profile_picture": (
+                    request.build_absolute_uri(
+                        customer.profile_picture.url
+                    )
+                    if customer.profile_picture
+                    else None
+                ),
+
+                "total_bookings": (
+                    item["total_bookings"]
+                ),
+
+                "completed_bookings": (
+                    item["completed_bookings"]
+                ),
+
+                "cancelled_bookings": (
+                    item["cancelled_bookings"]
+                ),
+
+                "total_spend": (
+                    total_spend
+                ),
+
+                "average_booking_value": (
+                    average_booking_value
+                ),
+            }
+        )
+
+    # =========================================================
+    # RANK TOP CUSTOMERS
+    # =========================================================
+
+    top_customers.sort(
+        key=lambda item: (
+            float(item["total_spend"]),
+            item["total_bookings"],
+        ),
+        reverse=True,
+    )
+
+    for index, customer in enumerate(
+        top_customers,
+        start=1,
+    ):
+        customer["rank"] = index
+
+    # Keep dashboard response manageable.
+    top_customers = top_customers[:10]
+
+    # =========================================================
+    # RESPONSE
+    # =========================================================
+
+    return Response(
+        {
+            "success": True,
+
+            "message": (
+                "Customer analytics "
+                "fetched successfully."
+            ),
+
+            "filters": {
+                "period": (
+                    dashboard_filters[
+                        "period"
+                    ]
+                ),
+
+                "from": (
+                    dashboard_filters[
+                        "start_date"
+                    ]
+                ),
+
+                "to": (
+                    dashboard_filters[
+                        "end_date"
+                    ]
+                ),
+
+                "service": (
+                    dashboard_filters[
+                        "service"
+                    ]
+                ),
+            },
+
+            "summary": {
+                "total_customers": (
+                    total_customers
+                ),
+
+                "active_customers": (
+                    active_customers
+                ),
+
+                "inactive_customers": (
+                    inactive_customers
+                ),
+
+                "new_customers": (
+                    new_customers
+                ),
+
+                "customers_with_bookings": (
+                    customers_with_bookings
+                ),
+
+                "customers_with_no_bookings": (
+                    customers_with_no_bookings
+                ),
+
+                "repeat_customers": (
+                    repeat_customers
+                ),
+
+                "repeat_booking_rate": (
+                    repeat_booking_rate
+                ),
+            },
+
+            "top_customers": (
+                top_customers
+            ),
+        },
+        status=status.HTTP_200_OK,
+    )
+
+@api_view(["GET"])
+@permission_classes([
+    IsAuthenticated,
+    CanViewReports,
+])
+def geographic_analytics_api(request):
+    """
+    Geographic marketplace demand analytics.
+
+    Supports:
+        ?period=7d
+        ?period=30d
+        ?period=6m
+        ?period=1y
+        ?from=YYYY-MM-DD
+        ?to=YYYY-MM-DD
+        ?service=plumber
+
+    Returns:
+        - demand by city/state
+        - completed/cancelled requests
+        - unique customers
+        - top service per area
+        - map points for frontend heatmaps
+    """
+
+    # =========================================================
+    # FILTERS
+    # =========================================================
+
+    dashboard_filters = get_dashboard_filters(
+        request
+    )
+
+    analytics_filters = {
+        **dashboard_filters,
+        "status": None,
+        "provider_id": None,
+    }
+
+    # =========================================================
+    # FILTERED SERVICE REQUESTS
+    # =========================================================
+
+    service_requests = (
+        filter_service_requests(
+            CustomerServiceRequest.objects
+            .select_related(
+                "category",
+                "customer",
+            ),
+            analytics_filters,
+        )
+    )
+
+    # Ignore records without useful geographic information.
+    geographic_requests = (
+        service_requests
+        .exclude(
+            city=""
+        )
+    )
+
+    # =========================================================
+    # GENERAL SUMMARY
+    # =========================================================
+
+    total_requests = (
+        geographic_requests.count()
+    )
+
+    total_cities = (
+        geographic_requests
+        .values(
+            "city",
+            "state",
+        )
+        .distinct()
+        .count()
+    )
+
+    total_states = (
+        geographic_requests
+        .values(
+            "state"
+        )
+        .exclude(
+            state=""
+        )
+        .distinct()
+        .count()
+    )
+
+    # =========================================================
+    # DEMAND BY CITY
+    # =========================================================
+
+    city_rows = (
+        geographic_requests
+        .values(
+            "city",
+            "state",
+        )
+        .annotate(
+            total_requests=Count(
+                "id"
+            ),
+
+            unique_customers=Count(
+                "customer_id",
+                distinct=True,
+            ),
+
+            completed_requests=Count(
+                "id",
+                filter=Q(
+                    status="completed"
+                ),
+            ),
+
+            cancelled_requests=Count(
+                "id",
+                filter=Q(
+                    status="cancelled"
+                ),
+            ),
+
+            urgent_requests=Count(
+                "id",
+                filter=Q(
+                    urgency="urgent"
+                ),
+            ),
+
+            emergency_requests=Count(
+                "id",
+                filter=Q(
+                    urgency="emergency"
+                ),
+            ),
+        )
+        .order_by(
+            "-total_requests"
+        )
+    )
+
+    # =========================================================
+    # BUILD CITY ANALYTICS
+    # =========================================================
+
+    cities = []
+
+    for city_row in city_rows:
+
+        city_name = city_row["city"]
+        state_name = city_row["state"]
+
+        # -----------------------------------------------------
+        # FIND TOP SERVICE IN THIS CITY
+        # -----------------------------------------------------
+
+        city_service_data = (
+            geographic_requests
+            .filter(
+                city=city_name,
+                state=state_name,
+            )
+            .values(
+                "category__id",
+                "category__name",
+                "category__key",
+            )
+            .annotate(
+                request_count=Count(
+                    "id"
+                )
+            )
+            .order_by(
+                "-request_count"
+            )
+            .first()
+        )
+
+        top_service = None
+
+        if city_service_data:
+            top_service = {
+                "service_id": (
+                    city_service_data[
+                        "category__id"
+                    ]
+                ),
+
+                "service_name": (
+                    city_service_data[
+                        "category__name"
+                    ]
+                ),
+
+                "service_key": (
+                    city_service_data[
+                        "category__key"
+                    ]
+                ),
+
+                "request_count": (
+                    city_service_data[
+                        "request_count"
+                    ]
+                ),
+            }
+
+        # -----------------------------------------------------
+        # COMPLETION RATE
+        # -----------------------------------------------------
+
+        completion_rate = 0
+
+        if city_row["total_requests"] > 0:
+            completion_rate = round(
+                (
+                    city_row[
+                        "completed_requests"
+                    ]
+                    / city_row[
+                        "total_requests"
+                    ]
+                )
+                * 100,
+                2,
+            )
+
+        # -----------------------------------------------------
+        # CANCELLATION RATE
+        # -----------------------------------------------------
+
+        cancellation_rate = 0
+
+        if city_row["total_requests"] > 0:
+            cancellation_rate = round(
+                (
+                    city_row[
+                        "cancelled_requests"
+                    ]
+                    / city_row[
+                        "total_requests"
+                    ]
+                )
+                * 100,
+                2,
+            )
+
+        cities.append(
+            {
+                "city": city_name,
+                "state": state_name,
+
+                "total_requests": (
+                    city_row[
+                        "total_requests"
+                    ]
+                ),
+
+                "unique_customers": (
+                    city_row[
+                        "unique_customers"
+                    ]
+                ),
+
+                "completed_requests": (
+                    city_row[
+                        "completed_requests"
+                    ]
+                ),
+
+                "cancelled_requests": (
+                    city_row[
+                        "cancelled_requests"
+                    ]
+                ),
+
+                "urgent_requests": (
+                    city_row[
+                        "urgent_requests"
+                    ]
+                ),
+
+                "emergency_requests": (
+                    city_row[
+                        "emergency_requests"
+                    ]
+                ),
+
+                "completion_rate": (
+                    completion_rate
+                ),
+
+                "cancellation_rate": (
+                    cancellation_rate
+                ),
+
+                "top_service": (
+                    top_service
+                ),
+            }
+        )
+
+    # =========================================================
+    # DEMAND BY STATE
+    # =========================================================
+
+    states = list(
+        geographic_requests
+        .exclude(
+            state=""
+        )
+        .values(
+            "state"
+        )
+        .annotate(
+            total_requests=Count(
+                "id"
+            ),
+
+            unique_customers=Count(
+                "customer_id",
+                distinct=True,
+            ),
+        )
+        .order_by(
+            "-total_requests"
+        )
+    )
+
+    # =========================================================
+    # MAP / HEATMAP POINTS
+    # =========================================================
+    #
+    # Frontend can use these points for:
+    # - heatmap
+    # - markers
+    # - demand visualization
+    #
+
+    map_queryset = (
+        geographic_requests
+        .exclude(
+            latitude__isnull=True
+        )
+        .exclude(
+            longitude__isnull=True
+        )
+    )
+
+    map_points = []
+
+    for item in map_queryset:
+
+        map_points.append(
+            {
+                "request_id": str(
+                    item.id
+                ),
+
+                "latitude": float(
+                    item.latitude
+                ),
+
+                "longitude": float(
+                    item.longitude
+                ),
+
+                "city": item.city,
+
+                "state": item.state,
+
+                "postal_code": (
+                    item.postal_code
+                ),
+
+                "service": {
+                    "id": (
+                        item.category.id
+                    ),
+
+                    "name": (
+                        item.category.name
+                    ),
+
+                    "key": (
+                        item.category.key
+                    ),
+                },
+
+                "status": item.status,
+
+                "urgency": item.urgency,
+            }
+        )
+
+    # =========================================================
+    # TOP DEMAND LOCATION
+    # =========================================================
+
+    top_location = None
+
+    if cities:
+        top_location = cities[0]
+
+    # =========================================================
+    # RESPONSE
+    # =========================================================
+
+    return Response(
+        {
+            "success": True,
+
+            "message": (
+                "Geographic analytics "
+                "fetched successfully."
+            ),
+
+            "filters": {
+                "period": (
+                    dashboard_filters[
+                        "period"
+                    ]
+                ),
+
+                "from": (
+                    dashboard_filters[
+                        "start_date"
+                    ]
+                ),
+
+                "to": (
+                    dashboard_filters[
+                        "end_date"
+                    ]
+                ),
+
+                "service": (
+                    dashboard_filters[
+                        "service"
+                    ]
+                ),
+            },
+
+            "summary": {
+                "total_requests": (
+                    total_requests
+                ),
+
+                "total_cities": (
+                    total_cities
+                ),
+
+                "total_states": (
+                    total_states
+                ),
+
+                "map_points": (
+                    len(map_points)
+                ),
+
+                "top_demand_location": (
+                    top_location
+                ),
+            },
+
+            "cities": cities,
+
+            "states": states,
+
+            "map_points": map_points,
         },
         status=status.HTTP_200_OK,
     )
